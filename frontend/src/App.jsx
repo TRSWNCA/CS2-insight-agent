@@ -11,6 +11,7 @@ import ProgressBar from "./components/ProgressBar";
 import MatchSwitcher from "./components/MatchSwitcher";
 import LibraryLoadModeModal from "./components/LibraryLoadModeModal";
 import RecordingQueueDrawer from "./components/RecordingQueueDrawer";
+import MontageWorkbenchDrawer from "./components/MontageWorkbenchDrawer";
 import { useRecordingQueue } from "./stores/recordingQueueStore";
 import { ensureClientClipUidsOnClips, stripClientClipUid } from "./utils/clipClientUid";
 import {
@@ -206,7 +207,9 @@ export default function App() {
   const [recordWarmupOpen, setRecordWarmupOpen] = useState(false);
   const [warmupIntent, setWarmupIntent] = useState(null);
   const [queueDrawerOpen, setQueueDrawerOpen] = useState(false);
+  const [montageDrawerOpen, setMontageDrawerOpen] = useState(false);
   const [cs2Path, setCs2Path] = useState("");
+  const [ffmpegPath, setFfmpegPath] = useState("");
   const [cs2FpsMax, setCs2FpsMax] = useState(240);
   const [demoWatchPaths, setDemoWatchPaths] = useState([]);
   const [expectedParsePlayersText, setExpectedParsePlayersText] = useState("");
@@ -655,6 +658,7 @@ export default function App() {
         }
         if (typeof data.ai_mode === "boolean") setAiMode(data.ai_mode);
         if (data.cs2_path) setCs2Path(data.cs2_path);
+        if (typeof data.ffmpeg_path === "string") setFfmpegPath(data.ffmpeg_path);
         if (typeof data.cs2_fps_max === "number") setCs2FpsMax(data.cs2_fps_max);
         if (Array.isArray(data.demo_watch_paths)) setDemoWatchPaths(data.demo_watch_paths);
         if (Array.isArray(data.expected_parse_players)) {
@@ -1284,6 +1288,8 @@ export default function App() {
         onPersistLlm={persistLlmConfig}
         cs2Path={cs2Path}
         onCs2PathChange={setCs2Path}
+        ffmpegPath={ffmpegPath}
+        onFfmpegPathChange={setFfmpegPath}
         cs2FpsMax={cs2FpsMax}
         onCs2FpsMaxChange={setCs2FpsMax}
         demoWatchPaths={demoWatchPaths}
@@ -1312,6 +1318,14 @@ export default function App() {
               >
                 <RefreshCw className="h-3.5 w-3.5" />
                 更换 Demo
+              </button>
+              <button
+                type="button"
+                onClick={() => setMontageDrawerOpen(true)}
+                disabled={batchRecording}
+                className="flex items-center gap-1.5 rounded-md border border-white/15 bg-white/[0.04] px-2.5 py-1.5 text-[11px] font-semibold text-zinc-300 transition-colors hover:border-cs2-orange/45 hover:text-white disabled:opacity-40"
+              >
+                合辑工作台
               </button>
               <button
                 type="button"
@@ -1689,6 +1703,8 @@ export default function App() {
           />
         )}
       </main>
+
+      <MontageWorkbenchDrawer open={montageDrawerOpen} onClose={() => setMontageDrawerOpen(false)} />
 
       <RecordingQueueDrawer
         open={queueDrawerOpen}

@@ -43,6 +43,8 @@ export default function Sidebar({
   onPersistLlm,
   cs2Path,
   onCs2PathChange,
+  ffmpegPath = "",
+  onFfmpegPathChange,
   cs2FpsMax = 240,
   onCs2FpsMaxChange,
   demoWatchPaths = [],
@@ -249,6 +251,13 @@ export default function Sidebar({
               placeholder="...\\game\\bin\\win64\\cs2.exe"
               onChange={(v) => onCs2PathChange?.(v)}
               onBlur={() => onSaveConfig?.({ cs2_path: cs2Path ?? "" })}
+            />
+            <Input
+              label="FFmpeg 可执行文件（合辑导出，可选）"
+              value={ffmpegPath ?? ""}
+              placeholder="留空则使用 PATH 中的 ffmpeg"
+              onChange={(v) => onFfmpegPathChange?.(v)}
+              onBlur={() => onSaveConfig?.({ ffmpeg_path: ffmpegPath ?? "" })}
             />
             <div className="space-y-1">
               <label className="block text-[10px] font-semibold uppercase tracking-wide text-cs2-text-secondary">

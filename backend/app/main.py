@@ -11,7 +11,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 import faulthandler
 
 from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
@@ -32,6 +32,8 @@ from .demo_db import DemoDB, utc_now_iso
 from .demo_library_hub import demo_library_hub
 from .demo_watcher import DemoWatcher
 from .gsi_ready import gsi_status, notify_gsi_payload
+from .montage_db import MontageDB
+from .video_composer import MontageComposerError, compose_montage, resolve_ffmpeg_binary, validate_output_path
 from .obs_director import (
     CS2_RUNNING_MESSAGE,
     CS2AlreadyRunningError,
@@ -60,6 +62,7 @@ except Exception:
 
 DB_PATH = resolve_config_path().parent / "cs2-insight.db"
 demo_db = DemoDB(DB_PATH)
+montage_db = MontageDB(DB_PATH)
 demo_watcher: DemoWatcher | None = None
 
 # 单次 / 批量录制共用：请求中止时 set()，任务结束后在 finally 中置回 None
@@ -126,6 +129,7 @@ async def lifespan(_: FastAPI):
     """
     global demo_watcher
     await demo_db.init_db()
+    await montage_db.init_tables()
     cfg = load_config()
     demo_watcher = DemoWatcher(cfg.demo_watch_paths or [], _enqueue_demo_path, demo_db)
     try:
@@ -134,7 +138,7 @@ async def lifespan(_: FastAPI):
         pass
 
 
-app = FastAPI(title="CS2 Insight Agent", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="CS2 Insight Agent", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -291,6 +295,43 @@ def _raise_if_recording_never_started(results: list[dict]) -> None:
             "unknown",
         )
         raise HTTPException(500, f"录制没有开始：{first_error}")
+
+
+async def _persist_recorded_clips_from_results(results: list[dict]) -> None:
+    """将成功录制的片段写入 recorded_clips 表（供合辑工作台）。"""
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        if str(r.get("status") or "") != "recorded":
+            continue
+        op = (r.get("output_path") or "").strip()
+        if not op:
+            continue
+        demo_path = (r.get("demo_path") or "").strip()
+        if not demo_path:
+            continue
+        clip_id = str(r.get("clip_id") or "")
+        demo_fn = (r.get("demo_filename") or "").strip() or None
+        player = (r.get("player_name") or "").strip() or None
+        dur = r.get("duration")
+        dur_f: float | None = None
+        if dur is not None:
+            try:
+                dur_f = float(dur)
+            except (TypeError, ValueError):
+                dur_f = None
+        try:
+            await montage_db.insert_recorded_clip(
+                clip_id=clip_id,
+                demo_path=demo_path,
+                demo_filename=demo_fn,
+                player_name=player,
+                output_path=op,
+                duration_sec=dur_f,
+                status="ready",
+            )
+        except Exception:
+            logger.exception("recorded_clips insert failed clip_id=%s path=%s", clip_id, op)
 
 
 # 监听目录按「期望玩家」自动写库展示名时串行，避免大量 demo 同时读盘
@@ -467,6 +508,7 @@ async def _auto_tag_library_demo_for_expected_players(demo_path: str) -> None:
 class ConfigPayload(BaseModel):
     obs: Optional[OBSConfig] = None
     llm: Optional[LLMConfig] = None
+    ffmpeg_path: Optional[str] = None
     cs2_path: Optional[str] = None
     demo_watch_paths: Optional[list[str]] = None
     ai_mode: Optional[bool] = None
@@ -548,6 +590,8 @@ async def update_config(payload: ConfigPayload):
     if payload.cs2_fps_max is not None:
         v = int(payload.cs2_fps_max)
         cfg.cs2_fps_max = max(30, min(v, 9999))
+    if payload.ffmpeg_path is not None:
+        cfg.ffmpeg_path = str(payload.ffmpeg_path).strip()
     save_config(cfg)
     if demo_watcher is not None and payload.demo_watch_paths is not None:
         # 只更新路径配置（供后续 /api/demos/scan 手动扫描使用）；
@@ -1042,6 +1086,7 @@ async def start_recording(req: RecordRequest):
             warmup=warmup_extras,
         )
         _raise_if_recording_never_started(results)
+        await _persist_recorded_clips_from_results(results)
         return {"status": "completed", "results": results}
     except CS2AlreadyRunningError as e:
         raise HTTPException(409, str(e)) from e
@@ -1200,6 +1245,7 @@ async def start_batch_recording(req: BatchRecordRequest):
         director = OBSDirector(obs_cfg, cfg.cs2_path, abort_event=abort_ev, cs2_fps_max=cfg.cs2_fps_max)
         results = await director.execute_batch_recording(demo_jobs, warmup=wobj)
         _raise_if_recording_never_started(results)
+        await _persist_recorded_clips_from_results(results)
         return {"status": "completed", "results": results}
     except CS2AlreadyRunningError as e:
         raise HTTPException(409, str(e)) from e
@@ -1231,11 +1277,150 @@ def cs2_gsi_status():
     return gsi_status()
 
 
+# ─── Montage (V2) ─────────────────────────────────────────────
+
+
+class MontageProjectBody(BaseModel):
+    project_id: Optional[int] = None
+    name: str = ""
+    recorded_clip_ids: list[int] = Field(default_factory=list)
+    bgm_path: Optional[str] = None
+    intro_path: Optional[str] = None
+    outro_path: Optional[str] = None
+    output_filename: str = Field(default="montage_export.mp4", max_length=240)
+
+
+@app.get("/api/recorded-clips")
+async def list_recorded_clips(
+    limit: int = Query(default=300, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+):
+    rows = await montage_db.list_recorded_clips(limit=limit, offset=offset)
+    return {"items": rows, "limit": limit, "offset": offset}
+
+
+@app.post("/api/montage/projects")
+async def save_montage_project(body: MontageProjectBody):
+    proj_body = {
+        "recorded_clip_ids": list(body.recorded_clip_ids),
+        "bgm_path": body.bgm_path,
+        "intro_path": body.intro_path,
+        "outro_path": body.outro_path,
+        "output_filename": (body.output_filename or "montage_export.mp4").strip() or "montage_export.mp4",
+    }
+    try:
+        pid = await montage_db.save_project(name=body.name.strip() or None, body=proj_body, project_id=body.project_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
+    item = await montage_db.get_project(pid)
+    if not item:
+        raise HTTPException(500, "保存合辑项目后读取失败")
+    return item
+
+
+class MontageExportBody(BaseModel):
+    project_id: Optional[int] = None
+    recorded_clip_ids: Optional[list[int]] = None
+    bgm_path: Optional[str] = None
+    intro_path: Optional[str] = None
+    outro_path: Optional[str] = None
+    output_path: str = Field(..., min_length=1, max_length=2048)
+
+
+@app.post("/api/montage/export")
+async def montage_export(body: MontageExportBody):
+    cfg = load_config()
+    try:
+        ffmpeg_bin = resolve_ffmpeg_binary(cfg.ffmpeg_path)
+    except MontageComposerError as e:
+        raise HTTPException(400, str(e)) from e
+
+    extras: dict[str, Any] = {}
+    if body.project_id is not None:
+        proj = await montage_db.get_project(int(body.project_id))
+        if not proj:
+            raise HTTPException(404, "合辑项目不存在")
+        extras = proj.get("body") if isinstance(proj.get("body"), dict) else {}
+
+    clip_ids = list(body.recorded_clip_ids) if body.recorded_clip_ids is not None else list(extras.get("recorded_clip_ids") or [])
+    if not clip_ids:
+        raise HTTPException(400, "recorded_clip_ids 不能为空")
+
+    def _coalesce(req_val: Optional[str], key: str) -> Optional[str]:
+        if req_val is not None:
+            s = str(req_val).strip()
+            return s or None
+        v = extras.get(key)
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+    bgm_s = _coalesce(body.bgm_path, "bgm_path")
+    intro_s = _coalesce(body.intro_path, "intro_path")
+    outro_s = _coalesce(body.outro_path, "outro_path")
+
+    try:
+        out = validate_output_path(body.output_path)
+    except MontageComposerError as e:
+        raise HTTPException(400, str(e)) from e
+
+    rows = await montage_db.get_recorded_clips_by_ids([int(x) for x in clip_ids])
+    clip_paths: list[Path] = []
+    for cid in clip_ids:
+        row = rows.get(int(cid))
+        if not row:
+            raise HTTPException(400, f"未知的 recorded_clip id: {cid}")
+        clip_paths.append(Path(str(row["output_path"])))
+
+    intro_p = Path(intro_s).expanduser() if intro_s else None
+    outro_p = Path(outro_s).expanduser() if outro_s else None
+    bgm_p = Path(bgm_s).expanduser() if bgm_s else None
+
+    snap = {
+        "recorded_clip_ids": clip_ids,
+        "bgm_path": bgm_s,
+        "intro_path": intro_s,
+        "outro_path": outro_s,
+        "output_path": str(out),
+    }
+    export_id = await montage_db.create_export(
+        project_id=int(body.project_id) if body.project_id is not None else None,
+        body=snap,
+        status="running",
+    )
+
+    try:
+        await asyncio.to_thread(
+            compose_montage,
+            ffmpeg_bin=ffmpeg_bin,
+            clip_paths=clip_paths,
+            intro_path=intro_p,
+            outro_path=outro_p,
+            bgm_path=bgm_p,
+            output_path=out,
+        )
+    except MontageComposerError as e:
+        await montage_db.update_export(export_id, status="error", error_msg=str(e), output_path=None)
+        raise HTTPException(400, str(e)) from e
+
+    await montage_db.update_export(export_id, status="done", error_msg="", output_path=str(out))
+    return {"export_id": export_id, "status": "done", "output_path": str(out)}
+
+
+@app.get("/api/montage/exports/{export_id}")
+async def get_montage_export(export_id: int):
+    row = await montage_db.get_export(export_id)
+    if not row:
+        raise HTTPException(404, "导出记录不存在")
+    return row
+
+
 # ─── Health ────────────────────────────────────────────────────
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": "2.0.0"}
 
 
 @app.get("/")

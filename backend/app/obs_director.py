@@ -573,12 +573,26 @@ class OBSDirector:
         demo_name = dem_path.name
         for idx in range(after_clip_idx + 1, len(clips)):
             c = clips[idx]
-            all_results.append({"clip_id": c["clip_id"], "status": "aborted", "demo_filename": demo_name})
+            all_results.append(
+                {
+                    "clip_id": c["clip_id"],
+                    "status": "aborted",
+                    "demo_path": str(dem_path),
+                    "demo_filename": demo_name,
+                },
+            )
         for j in range(job_idx + 1, len(demo_jobs)):
             dp, cls, _, _ = demo_jobs[j]
             n = dp.name
             for c in cls:
-                all_results.append({"clip_id": c["clip_id"], "status": "aborted", "demo_filename": n})
+                all_results.append(
+                    {
+                        "clip_id": c["clip_id"],
+                        "status": "aborted",
+                        "demo_path": str(dp),
+                        "demo_filename": n,
+                    },
+                )
 
     @property
     def state(self) -> DirectorState:
@@ -1815,6 +1829,60 @@ class OBSDirector:
             logger.debug("GetRecordDirectory failed: %s", e)
             return None
 
+    def _obs_snapshot_record_dir_video_paths(self) -> set[str]:
+        """录制开始前 OBS 输出目录中已有视频路径集合，用于 StopRecord 后兜底匹配新文件。"""
+        record_dir = self._obs_record_directory_path()
+        if not record_dir or not record_dir.is_dir():
+            return set()
+        out: set[str] = set()
+        try:
+            for p in record_dir.iterdir():
+                if not p.is_file() or p.suffix.lower() not in _RECORDING_VIDEO_EXTENSIONS:
+                    continue
+                try:
+                    out.add(str(p.resolve()))
+                except OSError:
+                    out.add(str(p))
+        except OSError as e:
+            logger.debug("Snapshot OBS record dir failed: %s", e)
+        return out
+
+    def _pick_new_recording_path_after_snapshot(
+        self,
+        before_paths: set[str],
+        started_at_wall: Optional[float],
+    ) -> Optional[Path]:
+        if started_at_wall is None:
+            return None
+        record_dir = self._obs_record_directory_path()
+        if not record_dir or not record_dir.is_dir():
+            return None
+        cutoff = float(started_at_wall) - 2.0
+        candidates: list[tuple[float, Path]] = []
+        try:
+            for p in record_dir.iterdir():
+                if not p.is_file() or p.suffix.lower() not in _RECORDING_VIDEO_EXTENSIONS:
+                    continue
+                try:
+                    key = str(p.resolve())
+                except OSError:
+                    key = str(p)
+                if key in before_paths:
+                    continue
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                if st.st_mtime >= cutoff:
+                    candidates.append((st.st_mtime, p))
+        except OSError as e:
+            logger.debug("Pick new recording file failed: %s", e)
+            return None
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
     def _locate_recent_recording_output(self, started_at_wall: Optional[float]) -> Optional[Path]:
         if started_at_wall is None:
             return None
@@ -1896,7 +1964,7 @@ class OBSDirector:
                 return candidate
         return source.with_name(f"{stem}_{uuid.uuid4().hex[:8]}{suffix}")
 
-    def _rename_recording_output(
+    async def _rename_recording_output(
         self,
         output_path: Optional[Path],
         clip: dict,
@@ -1907,22 +1975,26 @@ class OBSDirector:
             return {}
         source = output_path.expanduser()
         original = str(source)
-        try:
-            if not source.is_file():
-                return {"original_output_path": original, "rename_error": "OBS output file not found"}
-            stem = self._build_clip_recording_stem(clip, demo_abs, spectator_name)
-            target = self._unique_recording_target(source, stem)
-            if target != source:
-                source.rename(target)
-                logger.info("Renamed OBS recording %s -> %s", source, target)
-            return {
-                "original_output_path": original,
-                "output_path": str(target),
-                "output_filename": target.name,
-            }
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Could not rename OBS recording %s: %s", original, e)
-            return {"original_output_path": original, "rename_error": str(e)}
+        for attempt in range(5):
+            try:
+                if not source.is_file():
+                    raise FileNotFoundError("OBS output file not found")
+                stem = self._build_clip_recording_stem(clip, demo_abs, spectator_name)
+                target = self._unique_recording_target(source, stem)
+                if target != source:
+                    await asyncio.to_thread(source.rename, target)
+                    logger.info("Renamed OBS recording %s -> %s", source, target)
+                return {
+                    "original_output_path": original,
+                    "output_path": str(target),
+                    "output_filename": target.name,
+                }
+            except Exception as e:  # noqa: BLE001
+                if attempt < 4:
+                    await asyncio.sleep(0.5)
+                else:
+                    logger.warning("Could not rename OBS recording %s after 5 attempts: %s", original, e)
+                    return {"original_output_path": original, "rename_error": str(e)}
 
     @staticmethod
     def _recording_warmup_console_lines(w: RecordingWarmupExtras) -> list[str]:
@@ -2247,6 +2319,7 @@ class OBSDirector:
             spectator_user_id = clip["_spec_uid"]
 
         clip_id = str(clip["clip_id"])
+        player_name_for_db = (spectator_name or "").strip() or None
         self._check_abort()
         start_tick = max(0, int(clip["start_tick"]))
         end_tick = max(start_tick, int(clip["end_tick"]))
@@ -2341,6 +2414,7 @@ class OBSDirector:
         _jc_burn_sec = self._env_float("CS2_INSIGHT_JC_BURN_SEC", "0.9")
         _jc_burn_ticks = int(_jc_burn_sec * TICK_RATE)
         record_started_at_wall: Optional[float] = None
+        pre_record_video_paths: set[str] = set()
         stop_record_output_path: Optional[Path] = None
         output_result: dict = {}
         fatal_recording_error: Optional[str] = None
@@ -2430,7 +2504,13 @@ class OBSDirector:
 
         try:
             if not self._ws:
-                return {"clip_id": clip_id, "status": "obs_error"}
+                return {
+                    "clip_id": clip_id,
+                    "status": "obs_error",
+                    "demo_path": str(demo_abs),
+                    "demo_filename": demo_abs.name,
+                    "player_name": player_name_for_db,
+                }
             # prepare 结束后到真正 StartRecord 之间要做 OBS/光标，期间若不 pause，Demo 会空转吃掉首杀前预滚
             pause_bracket = (
                 sys.platform == "win32"
@@ -2457,6 +2537,7 @@ class OBSDirector:
             ):
                 cursor_bak = self._win_cursor_corner_backup()
                 self._win_cursor_move_corner(cursor_bak)
+            pre_record_video_paths = self._obs_snapshot_record_dir_video_paths()
             record_started_at_wall = time.time()
             self._ws.call(obs_requests.StartRecord())
 
@@ -2879,10 +2960,16 @@ class OBSDirector:
             except Exception as ce:
                 logger.debug("restore cursor pos: %s", ce)
             if record_started_at_wall is not None or stop_record_output_path is not None:
-                await asyncio.sleep(1.0)
+                if stop_record_output_path is None:
+                    stop_record_output_path = self._pick_new_recording_path_after_snapshot(
+                        pre_record_video_paths,
+                        record_started_at_wall,
+                    )
                 if stop_record_output_path is None:
                     stop_record_output_path = self._locate_recent_recording_output(record_started_at_wall)
-                output_result = self._rename_recording_output(stop_record_output_path, clip, demo_abs, spectator_name)
+                output_result = await self._rename_recording_output(
+                    stop_record_output_path, clip, demo_abs, spectator_name
+                )
 
         self._set_state(DirectorState.STOPPING, clip_id)
         if fatal_recording_error:
@@ -2892,6 +2979,7 @@ class OBSDirector:
                 "error": fatal_recording_error,
                 "duration": planned_wall_seconds,
                 "smart_jump_segments": len(segments) if use_smart_jump else 1,
+                "player_name": player_name_for_db,
                 **output_result,
             }
         return {
@@ -2899,6 +2987,7 @@ class OBSDirector:
             "status": "recorded",
             "duration": planned_wall_seconds,
             "smart_jump_segments": len(segments) if use_smart_jump else 1,
+            "player_name": player_name_for_db,
             **output_result,
         }
 
@@ -3019,7 +3108,15 @@ class OBSDirector:
 
             if not self.connect_obs():
                 self._set_state(DirectorState.ERROR, "Cannot connect to OBS")
-                return [{"clip_id": c["clip_id"], "status": "obs_error"} for c in clips]
+                return [
+                    {
+                        "clip_id": c["clip_id"],
+                        "status": "obs_error",
+                        "demo_path": str(demo_abs),
+                        "demo_filename": demo_abs.name,
+                    }
+                    for c in clips
+                ]
 
             self._set_state(DirectorState.LOADING_DEMO, str(demo_abs))
             load_ok = False
@@ -3032,7 +3129,14 @@ class OBSDirector:
                 logger.info("Recording aborted by user (pre-clip)")
                 await self._run_cleanup_step("OBS StopRecord after abort", self._safe_stop_obs_recording, timeout=10.0)
                 for c in clips:
-                    results.append({"clip_id": c["clip_id"], "status": "aborted"})
+                    results.append(
+                        {
+                            "clip_id": c["clip_id"],
+                            "status": "aborted",
+                            "demo_path": str(demo_abs),
+                            "demo_filename": demo_abs.name,
+                        },
+                    )
 
             if load_ok:
                 for clip_idx, clip in enumerate(clips):
@@ -3047,6 +3151,8 @@ class OBSDirector:
                             clip_idx=clip_idx,
                             warmup=warmup,
                         )
+                        one["demo_path"] = str(demo_abs)
+                        one["demo_filename"] = demo_abs.name
                         results.append(one)
                     except RecordingAborted:
                         logger.info("Recording aborted by user at clip %s", clip_id)
@@ -3055,9 +3161,23 @@ class OBSDirector:
                             self._safe_stop_obs_recording,
                             timeout=10.0,
                         )
-                        results.append({"clip_id": clip_id, "status": "aborted"})
+                        results.append(
+                            {
+                                "clip_id": clip_id,
+                                "status": "aborted",
+                                "demo_path": str(demo_abs),
+                                "demo_filename": demo_abs.name,
+                            },
+                        )
                         for c in clips[clip_idx + 1:]:
-                            results.append({"clip_id": c["clip_id"], "status": "aborted"})
+                            results.append(
+                                {
+                                    "clip_id": c["clip_id"],
+                                    "status": "aborted",
+                                    "demo_path": str(demo_abs),
+                                    "demo_filename": demo_abs.name,
+                                },
+                            )
                         break
                     except Exception as e:
                         logger.error("Recording failed for %s: %s", clip_id, e)
@@ -3065,7 +3185,15 @@ class OBSDirector:
                             self._obs_restore_hide_cursor_inputs()
                         except Exception:
                             pass
-                        results.append({"clip_id": clip_id, "status": "error", "error": str(e)})
+                        results.append(
+                            {
+                                "clip_id": clip_id,
+                                "status": "error",
+                                "error": str(e),
+                                "demo_path": str(demo_abs),
+                                "demo_filename": demo_abs.name,
+                            },
+                        )
 
         except RecordingAborted:
             self._set_state(DirectorState.STOPPING, "aborted")
@@ -3100,7 +3228,12 @@ class OBSDirector:
                     df = dem_path.name
                     for c in clips:
                         all_results.append(
-                            {"clip_id": c["clip_id"], "status": "obs_error", "demo_filename": df},
+                            {
+                                "clip_id": c["clip_id"],
+                                "status": "obs_error",
+                                "demo_path": str(dem_path),
+                                "demo_filename": df,
+                            },
                         )
                 return all_results
 
@@ -3138,6 +3271,7 @@ class OBSDirector:
                                 "clip_id": c["clip_id"],
                                 "status": "error",
                                 "error": str(e),
+                                "demo_path": str(demo_abs),
                                 "demo_filename": demo_name,
                             },
                         )
@@ -3193,6 +3327,7 @@ class OBSDirector:
                             batch_new_demo_first_clip=(job_idx > 0 and clip_idx == 0),
                         )
                         one["demo_filename"] = demo_name
+                        one["demo_path"] = str(demo_abs)
                         all_results.append(one)
                     except RecordingAborted:
                         logger.info("Batch recording aborted by user at clip %s", clip_id)
@@ -3202,7 +3337,12 @@ class OBSDirector:
                             timeout=10.0,
                         )
                         all_results.append(
-                            {"clip_id": clip_id, "status": "aborted", "demo_filename": demo_name},
+                            {
+                                "clip_id": clip_id,
+                                "status": "aborted",
+                                "demo_path": str(demo_abs),
+                                "demo_filename": demo_name,
+                            },
                         )
                         OBSDirector._append_aborted_results_for_tail(demo_jobs, job_idx, clip_idx, all_results)
                         await self._run_cleanup_step("CS2 shutdown after abort", self._kill_cs2, timeout=30.0)
@@ -3220,7 +3360,13 @@ class OBSDirector:
                         except Exception:
                             pass
                         all_results.append(
-                            {"clip_id": clip_id, "status": "error", "error": str(e), "demo_filename": demo_name},
+                            {
+                                "clip_id": clip_id,
+                                "status": "error",
+                                "error": str(e),
+                                "demo_path": str(demo_abs),
+                                "demo_filename": demo_name,
+                            },
                         )
 
                 if batch_aborted:

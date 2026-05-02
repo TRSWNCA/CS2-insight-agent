@@ -124,6 +124,8 @@ class LLMConfig(BaseModel):
 class AppConfig(BaseModel):
     obs: OBSConfig = Field(default_factory=OBSConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    # 合辑导出：留空则从 PATH 探测 ffmpeg.exe
+    ffmpeg_path: str = ""
     cs2_path: str = ""
     demo_directory: str = ""
     demo_watch_paths: list[str] = Field(default_factory=list)
