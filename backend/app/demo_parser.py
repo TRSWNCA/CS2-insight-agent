@@ -72,8 +72,11 @@ class MatchMeta:
     target_deaths: int = 0
     team_a_score: int = 0  # 通常为 Team 2
     team_b_score: int = 0  # 通常为 Team 3
+    team_a_name: str = "Team A"
+    team_b_name: str = "Team B"
     match_date: str = ""  # 预留；当前 Demo 无可靠真实开赛时间，保持空串
     duration_mins: int = 0  # 回放时长（分钟），来自 header playback_time
+    server_name: str = ""  # Demo Header 中的 server_name，用于来源推断
     # o/i/z/211 系梗标签（与前端 PlayerSelect 一致）；非梗局为空列表
     meme_series_badges: list[str] = field(default_factory=list)
     # 「研发全集」大卡专用：整局特殊战绩总评（仅在有 meme_death 合集且开启 AI 时填充）
@@ -616,15 +619,15 @@ class DemoAnalyzer:
         except Exception:
             return "unknown"
 
-    def _build_match_summary(self, match_start_tick: int) -> tuple[int, int, str, int]:
+    def _build_match_summary(self, match_start_tick: int) -> tuple[int, int, str, int, str, str]:
         """
-        全局比赛信息：Team2/Team3 最终比分、Demo 文件修改时间、回放时长（分钟）。
+        全局比赛信息：Team2/Team3 最终比分、Demo 文件修改时间、回放时长（分钟）、队伍名称。
         比分来自 round_end.winner（CT/T 或 2/3）；时长来自 parse_header().playback_time（秒）。
         """
-        ta, tb, md, dm, _ = collect_match_summary_metrics(
+        ta, tb, md, dm, _, tan, tbn = collect_match_summary_metrics(
             self.parser, self.dem_path, match_start_tick,
         )
-        return ta, tb, md, dm
+        return ta, tb, md, dm, tan, tbn
 
     def _safe_parse_event(
         self, event_name: str, other: Optional[list[str]] = None,
@@ -1022,6 +1025,12 @@ class DemoAnalyzer:
         freeze_to_death_rounds: Optional[list[int]] = None,
     ) -> ParseResult:
         map_name = self._detect_map()
+        try:
+            server_name = self.parser.parse_header().get("server_name", "") or ""
+        except BaseException as e:
+            if isinstance(e, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                raise
+            server_name = ""
 
         match_start_tick = _get_match_start_tick(self.parser)
 
@@ -2071,7 +2080,7 @@ class DemoAnalyzer:
                 _c.round == _last_rnd_num,
             )
 
-        team_a_score, team_b_score, match_date, duration_mins = self._build_match_summary(
+        team_a_score, team_b_score, match_date, duration_mins, team_a_name, team_b_name = self._build_match_summary(
             match_start_tick,
         )
 
@@ -2113,8 +2122,11 @@ class DemoAnalyzer:
                 target_deaths=target_total_deaths,
                 team_a_score=team_a_score,
                 team_b_score=team_b_score,
+                team_a_name=team_a_name,
+                team_b_name=team_b_name,
                 match_date=match_date,
                 duration_mins=duration_mins,
+                server_name=server_name,
                 meme_series_badges=meme_series_badges_for_kd(target_total_kills, target_total_deaths),
             ),
             clips=clips,
@@ -4793,16 +4805,55 @@ def _scoreline_by_starting_roster(
     return wins_start2, wins_start3
 
 
+def _extract_team_names_from_demo(parser: DemoParser, tick: int) -> tuple[Optional[str], Optional[str]]:
+    """从 Demo 内部属性提取队伍名称 (CCSTeam.m_szClanTeamname)."""
+    try:
+        t = max(1, tick)
+        # CS2 队伍名通常在 CCSTeam 实体中
+        df = _to_pandas_df(parser.parse_ticks(["CCSTeam.m_szClanTeamname", "CCSTeam.m_iTeamNum"], ticks=[t]))
+        if df.empty:
+            return None, None
+
+        t2_name = None
+        t3_name = None
+        col_name = "CCSTeam.m_szClanTeamname"
+        col_num = "CCSTeam.m_iTeamNum"
+
+        if col_name not in df.columns or col_num not in df.columns:
+            return None, None
+
+        for _, row in df.iterrows():
+            tn = _cell_team(row.get(col_num))
+            name = _cell_str(row.get(col_name))
+            if not name or name.lower() in ("ct", "terrorist", "t"):
+                continue
+            if tn == 2:
+                t2_name = name
+            elif tn == 3:
+                t3_name = name
+            if t2_name and t3_name:
+                break
+        return t2_name, t3_name
+    except Exception:
+        return None, None
+
+
 def collect_match_summary_metrics(
     parser: DemoParser,
     dem_path: Path,
     match_start_tick: int,
-) -> tuple[int, int, str, int, int]:
+) -> tuple[int, int, str, int, int, str, str]:
     """
-    全局比赛信息：开赛时 Team2 / Team3 阵容各自胜场、Demo 文件时间、时长（分钟）、总回合。
+    全局比赛信息：开赛时 Team2 / Team3 阵容各自胜场、Demo 文件时间、时长（分钟）、总回合、队伍名称。
     """
     team_a_score = 0
     team_b_score = 0
+
+    # 仅从 Demo 内部提取队伍名 (Team 2=A, Team 3=B)
+    internal_a, internal_b = _extract_team_names_from_demo(parser, match_start_tick)
+    team_a_name = internal_a or "Team A"
+    team_b_name = internal_b or "Team B"
+
     # Demo 内无可靠真实开赛时间，不向客户端展示误导性的文件时间
     match_date = ""
     duration_mins = 0
@@ -4826,7 +4877,10 @@ def collect_match_summary_metrics(
         re_df = pd.DataFrame()
 
     if re_df.empty:
-        return team_a_score, team_b_score, match_date, duration_mins, total_rounds_est
+        return (
+            team_a_score, team_b_score, match_date, duration_mins, total_rounds_est,
+            team_a_name, team_b_name,
+        )
 
     re_filtered = re_df
     if match_start_tick > 0 and "tick" in re_df.columns:
@@ -4853,7 +4907,10 @@ def collect_match_summary_metrics(
     duration_ticks = _duration_mins_from_tick_span(match_start_tick, max_tick)
     duration_mins = max(duration_header, duration_ticks)
 
-    return team_a_score, team_b_score, match_date, duration_mins, total_rounds_est
+    return (
+        team_a_score, team_b_score, match_date, duration_mins, total_rounds_est,
+        team_a_name, team_b_name,
+    )
 
 
 def get_demo_match_summary(dem_path: str | Path) -> dict[str, object]:
@@ -4874,17 +4931,21 @@ def get_demo_match_summary(dem_path: str | Path) -> dict[str, object]:
         "team_b_score": 0,
         "match_date": "",
         "duration_mins": 0,
+        "server_name": "",
     }
     try:
         parser = DemoParser(str(path))
         mst = _get_match_start_tick(parser)
-        ta, tb, md, dm, tr_est = collect_match_summary_metrics(parser, path, mst)
+        ta, tb, md, dm, tr_est, tan, tbn = collect_match_summary_metrics(parser, path, mst)
         try:
-            mn = parser.parse_header().get("map_name", "unknown") or "unknown"
+            header = parser.parse_header()
+            mn = header.get("map_name", "unknown") or "unknown"
+            sn = header.get("server_name", "") or ""
         except BaseException as e:
             if isinstance(e, (KeyboardInterrupt, SystemExit, GeneratorExit)):
                 raise
             mn = "unknown"
+            sn = ""
         return {
             "map_name": mn,
             "target_player": "",
@@ -4895,8 +4956,11 @@ def get_demo_match_summary(dem_path: str | Path) -> dict[str, object]:
             "target_deaths": 0,
             "team_a_score": int(ta),
             "team_b_score": int(tb),
+            "team_a_name": tan,
+            "team_b_name": tbn,
             "match_date": md,
             "duration_mins": int(dm),
+            "server_name": sn,
         }
     except BaseException as e:
         if isinstance(e, (KeyboardInterrupt, SystemExit, GeneratorExit)):
