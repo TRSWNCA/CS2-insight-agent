@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Film, User } from "lucide-react";
+import { Film, User, Sparkles } from "lucide-react";
 import ClipCard from "./ClipCard";
 
 const NO_QUEUED = new Set();
@@ -92,7 +92,7 @@ export default function ClipList({
                 type="button"
                 onClick={() => onPlayerTabChange?.(name)}
                 className={[
-                  "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-semibold transition-all duration-150",
+                  "relative flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-semibold transition-all duration-150",
                   isActive
                     ? "bg-cs2-orange text-black shadow-md shadow-cs2-orange/30"
                     : "bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-zinc-200",
@@ -108,6 +108,7 @@ export default function ClipList({
                 >
                   {cnt}
                 </span>
+                <Sparkles className="absolute -top-1 -right-1 h-3 w-3 text-cs2-orange animate-pulse drop-shadow-[0_0_5px_rgba(255,170,0,0.7)]" />
               </button>
             );
           })}

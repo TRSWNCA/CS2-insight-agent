@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import axios from "axios";
 import {
   Settings,
@@ -54,6 +54,7 @@ export default function Sidebar({
   expectedParsePlayersText = "",
   onExpectedParsePlayersTextChange,
   onSaveExpectedParsePlayers,
+  configLoaded = false,
 }) {
   const [obsOpen, setObsOpen] = useState(true);
   const [cs2Open, setCs2Open] = useState(true);
@@ -65,6 +66,16 @@ export default function Sidebar({
   const [showApiKey, setShowApiKey] = useState(false);
   const [watchOpen, setWatchOpen] = useState(true);
   const [watchPathInput, setWatchPathInput] = useState("");
+
+  useEffect(() => {
+    if (configLoaded) {
+      setObsOpen(!obsConfig.password && !obsPasswordPlaceholder.includes("*"));
+      setCs2Open(!cs2Path);
+      setLlmOpen(!llmConfig.api_key && !llmKeySavedOnServer);
+      setExpectedPlayersOpen(!expectedParsePlayersText?.trim());
+      setWatchOpen(!demoWatchPaths?.length);
+    }
+  }, [configLoaded]);
 
   const handleDetectCs2 = async () => {
     if (!onDetectCs2) return;

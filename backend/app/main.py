@@ -6,7 +6,9 @@ import asyncio
 import json
 import logging
 import os
+import platform
 import shutil
+import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -80,7 +82,57 @@ _enqueue_striped_init_lock = asyncio.Lock()
 _ENQUEUE_STRIPE_COUNT = 64
 
 
+import re
+
+def infer_demo_source(filename: str, server_name: str | None = None) -> str:
+    fn = filename.lower()
+    sn = (server_name or "").lower()
+
+    # 1. 优先检查 server_name (从 Demo Header 提取)
+    if "faceit" in sn:
+        return "Faceit"
+    if "5eplay" in sn or "5e" in sn:
+        return "5E"
+    if "完美世界" in sn or "wanmei" in sn:
+        return "Perfect World"
+    if "valve" in sn:
+        return "Matchmaking"
+    if "esl" in sn:
+        return "ESL"
+    if "esea" in sn:
+        return "ESEA"
+    if "blast" in sn:
+        return "Blast"
+    if "challengermode" in sn:
+        return "Challengermode"
+
+    # 2. 检查文件名特征 (Regex)
+    # 5E: 通常是 g开头-数字-地图...
+    if re.match(r"^g\d+-", fn):
+        return "5E"
+    # Faceit: 123456789_team_a_vs_team_b...
+    if re.match(r"^\d+_team", fn):
+        return "Faceit"
+    
+    # 3. 检查文件名关键词 (兜底)
+    if "faceit" in fn:
+        return "Faceit"
+    if "5e" in fn:
+        return "5E"
+    if "perfectworld" in fn or "pvp" in fn:
+        return "Perfect World"
+    if "match730" in fn or "matchmaking" in fn:
+        return "Matchmaking"
+    if "esl" in fn:
+        return "ESL"
+    if "esea" in fn:
+        return "ESEA"
+
+    return "Local/Other"
+
+
 async def _enqueue_demo_path(path: Path) -> None:
+    """发现新 demo 文件：登记到 pending 状态（待入库），由 batch-ingest 提取元数据。"""
     global _enqueue_striped_locks
     async with _enqueue_striped_init_lock:
         if not _enqueue_striped_locks:
@@ -92,30 +144,19 @@ async def _enqueue_demo_path(path: Path) -> None:
     stripe = (hash(demo_path) & 0x7FFFFFFF) % _ENQUEUE_STRIPE_COUNT
     async with _enqueue_striped_locks[stripe]:
         size: int | None = None
+        mtime_iso: str | None = None
         try:
-            size = path.stat().st_size
+            st = path.stat()
+            size = st.st_size
+            from datetime import datetime, timezone
+            mtime_iso = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
         except OSError:
             pass
-        _, inserted = await demo_db.add_demo(demo_path, file_size=size)
+
+        source = infer_demo_source(path.name)
+        _, inserted = await demo_db.add_demo(demo_path, file_size=size, source=source, status="pending", added_at=mtime_iso)
         if not inserted:
-            # 已入库：若仍无展示名且配置了关注名单，补跑一次（与新建入库一样同步完成）
-            cfg_dup = load_config()
-            if _normalized_expected_parse_players(cfg_dup):
-                row_dup = await demo_db.get_demo_by_path(demo_path)
-                if row_dup and not (row_dup.get("display_name") or "").strip():
-                    await _auto_tag_library_demo_for_expected_players(demo_path)
             return
-        # 轻量解析：只提取地图与记分板元数据，避免重量级玩家片段解析。
-        try:
-            meta = await asyncio.to_thread(get_demo_match_summary_isolated, demo_path)
-            if isinstance(meta, dict):
-                await demo_db.update_lightweight_meta(demo_path, meta)
-        except Exception:
-            logger.exception("Lightweight meta parse failed for %s", demo_path)
-        await demo_db.update_status(demo_path, "pending", error_msg=None, parsed_at=None)
-        cfg_now = load_config()
-        if _normalized_expected_parse_players(cfg_now):
-            await _auto_tag_library_demo_for_expected_players(demo_path)
     await demo_library_hub.notify("enqueue")
 
 
@@ -417,9 +458,13 @@ async def _run_library_demo_analyze(
 ) -> dict:
     if not target_players:
         raise HTTPException(400, "target_players 不能为空")
-    await demo_db.clear_result(dem_path)
-    await demo_db.update_status(dem_path, "pending", error_msg=None, parsed_at=None)
-    players_out: dict = {}
+    
+    # 读取现有结果以便合并，而不是直接清除
+    existing_result = await demo_db.get_result(dem_path) or {}
+    players_data = existing_result.get("players") or {}
+    
+    await demo_db.update_status(dem_path, "loaded", error_msg=None, parsed_at=None)
+    new_players_out: dict = {}
     try:
         for player in target_players:
             parsed = await asyncio.to_thread(
@@ -428,7 +473,7 @@ async def _run_library_demo_analyze(
                 player,
                 freeze_to_death_rounds,
             )
-            players_out[player] = parsed
+            new_players_out[player] = parsed
     except IsolatedParseError as e:
         msg = f"Demo 解析失败：{e}"
         logger.error("Library demo parse failed demo_id=%s path=%s: %s", demo_id, dem_path, e)
@@ -439,7 +484,7 @@ async def _run_library_demo_analyze(
     cfg = load_config()
     if cfg.ai_mode and cfg.llm.api_key:
         async def _enrich_library_player(player: str) -> None:
-            pdata = players_out.get(player)
+            pdata = new_players_out.get(player)
             if not isinstance(pdata, dict):
                 return
             clips = pdata.get("clips") or []
@@ -458,12 +503,38 @@ async def _run_library_demo_analyze(
 
         await asyncio.gather(*[_enrich_library_player(p) for p in target_players])
 
+    # 合并新解析的玩家数据到总结果中
+    for p, data in new_players_out.items():
+        players_data[p] = data
+
     first_player = target_players[0]
-    await demo_db.save_result(dem_path, {**players_out[first_player], "auto_target_player": first_player})
+    await demo_db.save_result(dem_path, {
+        "players": players_data,
+        "auto_target_player": first_player
+    })
+    
+    # 完整解析后的比分/回合/时长/地图回写 demo_files；重新推断来源，不覆盖 remark
+    mm = new_players_out[first_player].get("match_meta") or {}
+    meta_for_db = {
+        "map_name": mm.get("map_name"),
+        "total_rounds": mm.get("total_rounds"),
+        "team_a_score": mm.get("team_a_score"),
+        "team_b_score": mm.get("team_b_score"),
+        "team_a_name": mm.get("team_a_name"),
+        "team_b_name": mm.get("team_b_name"),
+        "duration_mins": mm.get("duration_mins"),
+        "match_date": mm.get("match_date"),
+    }
+    refined_source = infer_demo_source(Path(dem_path).name, server_name=mm.get("server_name"))
+    await demo_db.update_lightweight_meta(dem_path, meta_for_db, source=refined_source)
     await demo_db.update_status(dem_path, "done", error_msg=None, parsed_at=utc_now_iso())
     await _maybe_update_library_display_for_expected(demo_id, dem_path)
     await demo_library_hub.notify("analyzed")
-    return {"players": players_out, "demo_path": dem_path}
+    return {
+        "players": players_data,
+        "auto_target_player": first_player,
+        "demo_path": dem_path
+    }
 
 
 async def _auto_tag_library_demo_for_expected_players(demo_path: str) -> None:
@@ -653,23 +724,26 @@ async def upload_demo(file: UploadFile = File(...)):
 
 @app.post("/api/demo/upload-multiple")
 async def upload_demos(files: Annotated[list[UploadFile], File()]):
-    """一次上传多个 .dem，返回与单文件 upload 相同结构的数组。"""
+    """一次上传多个 .dem，保存并登记到数据库 pending 状态（待入库）。"""
     if not files:
         raise HTTPException(400, "请至少选择一个文件")
+    
     out: list[dict] = []
     for file in files:
         if not file.filename or not str(file.filename).lower().endswith(".dem"):
             raise HTTPException(400, f"仅接受 .dem 文件: {file.filename!r}")
+        
         dest = UPLOAD_DIR / file.filename
         with dest.open("wb") as f:
             shutil.copyfileobj(file.file, f)
-        players, match_meta = await _safe_upload_demo_meta(dest)
+        
+        # 登记到数据库，状态为 pending (待入库)
+        await _enqueue_demo_path(dest)
+        
         out.append(
             {
                 "filename": file.filename,
                 "path": str(dest),
-                "players": players,
-                "match_meta": match_meta,
             },
         )
     return {"uploads": out}
@@ -804,7 +878,8 @@ async def parse_demo_batch(req: BatchParseRequest):
 
 # ─── Local demo library endpoints ─────────────────────────────
 
-_DEMO_LIBRARY_ALLOWED_STATUSES = frozenset({"pending", "done", "error"})
+# 主库只展示已入库（已提取元数据）或已完成解析的 Demo
+_DEMO_LIBRARY_ALLOWED_STATUSES = frozenset({"loaded", "done", "error"})
 
 
 def _split_csv_query_param(s: Optional[str]) -> list[str]:
@@ -982,6 +1057,63 @@ async def demo_library_event_stream():
     )
 
 
+# ── Discovered demos (pre-ingestion staging) ──
+
+
+class BatchIngestBody(BaseModel):
+    demo_ids: list[int] = Field(..., min_length=1, max_length=200)
+
+
+@app.get("/api/demos/discovered")
+async def list_discovered_demos(
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    q: Optional[str] = Query(default=None, max_length=200),
+):
+    """列出已发现但尚未入库（未提取元数据）的 demo。"""
+    qn = (q or "").strip() or None
+    total = await demo_db.count_discovered_demos(name_query=qn)
+    rows = await demo_db.list_discovered_demos(limit=limit, offset=offset, name_query=qn)
+    return {"items": rows, "limit": limit, "offset": offset, "total": total, "q": qn}
+
+
+@app.post("/api/demos/batch-ingest")
+async def batch_ingest_demos(body: BatchIngestBody):
+    """批量入库：对每个 pending demo 运行轻量元数据提取，状态改为 done（轻量解析完成）。"""
+    ingested = 0
+    failed: list[dict[str, Any]] = []
+    for demo_id in body.demo_ids:
+        row = await demo_db.get_demo_by_id(demo_id)
+        if not row:
+            failed.append({"demo_id": demo_id, "error": "Demo 不存在"})
+            continue
+        if (row.get("status") or "") != "pending":
+            failed.append({"demo_id": demo_id, "error": f"当前状态为 {row.get('status')}，非 pending"})
+            continue
+        dem_path = str(row["path"])
+        if not Path(dem_path).is_file():
+            failed.append({"demo_id": demo_id, "filename": row.get("filename", ""), "error": "文件不存在"})
+            continue
+        try:
+            meta = await asyncio.to_thread(get_demo_match_summary_isolated, dem_path)
+            if isinstance(meta, dict):
+                refined_source = infer_demo_source(Path(dem_path).name, server_name=meta.get("server_name"))
+                await demo_db.update_lightweight_meta(dem_path, meta, source=refined_source)
+            
+            # 建立玩家统计索引，确保入库后立即能看到队员列表
+            await index_demo_player_stats(demo_id, dem_path)
+            
+            await demo_db.update_status(dem_path, "loaded", error_msg=None, parsed_at=utc_now_iso())
+            await _maybe_update_library_display_for_expected(demo_id, dem_path)
+            ingested += 1
+        except Exception as e:
+            logger.exception("Ingest failed demo_id=%s path=%s", demo_id, dem_path)
+            failed.append({"demo_id": demo_id, "filename": row.get("filename", ""), "error": str(e)})
+    if ingested:
+        await demo_library_hub.notify("enqueue")
+    return {"ingested": ingested, "failed": failed}
+
+
 @app.get("/api/demos/{demo_id}")
 async def get_demo_library_item(demo_id: int):
     """单条 Demo 库记录（与列表项结构一致），用于跨页选中后按 id 拉取元数据。"""
@@ -1039,7 +1171,28 @@ class BatchResolvePlayersBody(BaseModel):
 @app.post("/api/demos/batch-resolve-players")
 async def batch_resolve_players(body: BatchResolvePlayersBody):
     if body.mode == "none":
-        return {"resolved": {str(i): [] for i in body.demo_ids}}
+        # 无指定名单时：返回每场 Demo 的全部玩家阵容，供前端直接触发解析。
+        resolved: dict[str, list[str]] = {}
+        for did in body.demo_ids:
+            row = await demo_db.get_demo_by_id(int(did))
+            if not row:
+                resolved[str(did)] = []
+                continue
+            dem_path = str(row["path"])
+            # 优先用已索引的玩家统计；尚未建索引时，直接从 Demo 中解析 roster。
+            try:
+                players = await demo_db.list_demo_player_stats(int(did))
+                names = [str(p.get("name") or "").strip() for p in players if (p.get("name") or "").strip()]
+            except Exception:
+                names = []
+            if not names:
+                try:
+                    roster = await asyncio.to_thread(get_player_list_isolated, dem_path)
+                    names = [str(r.get("name") or "").strip() for r in roster if (r.get("name") or "").strip()]
+                except Exception:
+                    names = []
+            resolved[str(did)] = names
+        return {"resolved": resolved}
     if body.mode == "config_expected":
         cfg = load_config()
         exp = _normalized_expected_parse_players(cfg)
@@ -1049,28 +1202,34 @@ async def batch_resolve_players(body: BatchResolvePlayersBody):
         exp = [s.strip() for s in (body.manual_lines or []) if isinstance(s, str) and s.strip()]
     else:
         exp = []
-    resolved: dict[str, list[str]] = {}
+    resolved2: dict[str, list[str]] = {}
     for did in body.demo_ids:
         row = await demo_db.get_demo_by_id(int(did))
         if not row:
-            resolved[str(did)] = []
+            resolved2[str(did)] = []
             continue
         dem_path = str(row["path"])
         try:
             matched = await asyncio.to_thread(_matched_demo_players_in_order, exp, dem_path)
         except Exception:
             logger.exception("batch_resolve roster match failed demo_id=%s", did)
-            resolved[str(did)] = []
+            resolved2[str(did)] = []
             continue
         names = [str(r.get("name") or "").strip() for r in matched if r.get("name")]
-        resolved[str(did)] = names
-    return {"resolved": resolved}
+        resolved2[str(did)] = names
+    return {"resolved": resolved2}
 
 
 class DemoDisplayNamePatch(BaseModel):
     """仅更新库内展示名，不修改磁盘文件；空串表示清除展示名（界面回退为 ``filename``）。"""
 
     display_name: str = Field(default="", max_length=512)
+
+
+class DemoRemarkPatch(BaseModel):
+    """更新库内备注。"""
+
+    remark: str = Field(default="", max_length=2000)
 
 
 @app.patch("/api/demos/{demo_id}")
@@ -1085,6 +1244,71 @@ async def patch_demo_display_name(demo_id: int, body: DemoDisplayNamePatch):
     return item
 
 
+@app.patch("/api/demos/{demo_id}/remark")
+async def patch_demo_remark(demo_id: int, body: DemoRemarkPatch):
+    ok = await demo_db.update_remark(demo_id, body.remark)
+    if not ok:
+        raise HTTPException(404, f"Demo not found: {demo_id}")
+    item = await demo_db.get_demo_list_item(demo_id)
+    if not item:
+        raise HTTPException(404, f"Demo not found: {demo_id}")
+    await demo_library_hub.notify("remark")
+    return item
+
+
+@app.post("/api/demos/{demo_id}/open-file")
+async def open_demo_file(demo_id: int):
+    """Windows 上用 ``explorer /select,filepath`` 打开文件所在位置并选中文件。"""
+    row = await demo_db.get_demo_by_id(demo_id)
+    if not row:
+        raise HTTPException(404, f"Demo not found: {demo_id}")
+    path = Path(row["path"])
+    if not path.exists():
+        raise HTTPException(404, f"Demo file not found on disk: {path}")
+    try:
+        if platform.system() == "Windows":
+            subprocess.Popen(["explorer", "/select,", str(path)])
+        elif platform.system() == "Darwin":
+            subprocess.Popen(["open", "-R", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path.parent)])
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to open file location: {e}")
+
+
+@app.post("/api/demos/{demo_id}/play")
+async def play_demo_cs2(demo_id: int):
+    row = await demo_db.get_demo_by_id(demo_id)
+    if not row:
+        raise HTTPException(404, f"Demo not found: {demo_id}")
+
+    cfg = load_config()
+    cs2_path = cfg.cs2_path
+    if not cs2_path or not Path(cs2_path).is_file():
+        raise HTTPException(400, "CS2 path not configured correctly.")
+
+    try:
+        # 将 Demo 复制到 game/csgo 目录下使用相对路径启动，这是 Source 2 最稳定的播放方式
+        cs2_bin = Path(cs2_path)
+        # 约定结构: game/bin/win64/cs2.exe -> game/csgo/
+        game_root = cs2_bin.parents[2]
+        csgo_dir = game_root / "csgo"
+        dest = csgo_dir / "cs2_insight_preview.dem"
+        
+        shutil.copy2(row["path"], dest)
+        
+        # 使用相对路径 +playdemo 启动，并设置 cwd 为游戏根目录
+        # 增加 -insecure 确保加载顺畅，增加 -console 确保控制台可用
+        logger.info("Launching CS2 for demo play: %s with cwd=%s", cs2_path, game_root)
+        subprocess.Popen(
+            [cs2_path, "-steam", "-insecure", "-novid", "-console", "+playdemo", "cs2_insight_preview.dem"],
+            cwd=game_root
+        )
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to launch CS2: {e}")
+
 @app.post("/api/demos/scan")
 async def scan_watch_paths():
     if demo_watcher is None:
@@ -1095,7 +1319,11 @@ async def scan_watch_paths():
         idx_summary = await _index_all_missing_player_stats()
     except Exception:
         logger.exception("player stats index batch after scan failed")
-    return {"scanned": scanned, "player_stats_index": idx_summary}
+    try:
+        discovered_count = await demo_db.count_discovered_demos()
+    except Exception:
+        discovered_count = 0
+    return {"scanned": scanned, "player_stats_index": idx_summary, "discovered_count": discovered_count}
 
 
 @app.post("/api/demos/{demo_id}/parse")
@@ -1104,9 +1332,9 @@ async def reparse_demo(demo_id: int):
     if not row:
         raise HTTPException(404, f"Demo not found: {demo_id}")
     await demo_db.clear_result(row["path"])
-    await demo_db.update_status(row["path"], "pending", error_msg=None, parsed_at=None)
+    await demo_db.update_status(row["path"], "loaded", error_msg=None, parsed_at=None)
     await demo_library_hub.notify("reparse")
-    return {"status": "pending", "demo_id": demo_id}
+    return {"status": "loaded", "demo_id": demo_id}
 
 
 class DemoAnalyzeRequest(BaseModel):
@@ -1120,17 +1348,30 @@ async def get_demo_players(demo_id: int):
     if not row:
         raise HTTPException(404, f"Demo not found: {demo_id}")
     dem_path = row["path"]
+    
+    # 优先从数据库读取玩家名单，避免重复解析文件
+    db_players = await demo_db.list_demo_player_stats(demo_id)
+    if db_players:
+        roster = [{"name": p["player_name"], "team_number": p["team_number"]} for p in db_players]
+    else:
+        # 兜底：如果数据库里没有（例如迁移过来的老数据），则解析文件
+        roster = await asyncio.to_thread(get_player_list_isolated, dem_path)
+
     match_meta = {
         "map_name": row.get("map_name"),
         "total_rounds": row.get("total_rounds"),
         "team_a_score": row.get("team_a_score"),
         "team_b_score": row.get("team_b_score"),
+        "team_a_name": row.get("team_a_name"),
+        "team_b_name": row.get("team_b_name"),
         "duration_mins": row.get("duration_mins"),
         "match_date": row.get("match_date"),
     }
     return {
-        "players": await asyncio.to_thread(get_player_list_isolated, dem_path),
+        "players": roster,
         "match_meta": match_meta,
+        "demo_filename": row["filename"],
+        "path": dem_path,
     }
 
 
@@ -1153,8 +1394,9 @@ async def analyze_demo_from_library(demo_id: int, req: DemoAnalyzeRequest):
 async def delete_demo(
     demo_id: int,
     rescan: Annotated[Literal["reimport", "skip"], Query(description="reimport=再次扫描可入库; skip=扫描不再入库")] = "reimport",
+    delete_file: Annotated[bool, Query(description="同时删除磁盘上的 .dem 文件")] = False,
 ):
-    ok = await demo_db.delete_demo(demo_id, rescan=rescan)
+    ok = await demo_db.delete_demo(demo_id, rescan=rescan, delete_file=delete_file)
     if not ok:
         raise HTTPException(404, f"Demo not found: {demo_id}")
     await demo_library_hub.notify("deleted")

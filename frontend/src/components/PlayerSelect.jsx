@@ -1,4 +1,4 @@
-import { Crosshair, Search, CheckSquare } from "lucide-react";
+import { Crosshair, Search, CheckSquare, Sparkles } from "lucide-react";
 
 /**
  * CS2 社区梗标签（判断顺序不可打乱）
@@ -25,7 +25,7 @@ function normalizePlayer(p) {
   }
   return {
     name: p.name ?? "",
-    team: Number(p.team) || 0,
+    team: Number(p.team ?? p.team_number) || 0,
     kills: Number(p.kills) || 0,
     deaths: Number(p.deaths) || 0,
     assists: Number(p.assists) || 0,
@@ -39,7 +39,7 @@ const MEME_BADGE_CLASS =
   "shadow-[0_0_14px_rgba(236,72,153,0.85),0_0_28px_rgba(168,85,247,0.45)]";
 
 /** selected: string[] — 已选玩家名称数组 */
-function PlayerRow({ player, selected, onSelect }) {
+function PlayerRow({ player, selected, onSelect, isParsed }) {
   const { name, kills, deaths, assists } = player;
   const memeTags = getMemeTags(kills, deaths, assists);
   const isSelected = selected.includes(name);
@@ -49,7 +49,7 @@ function PlayerRow({ player, selected, onSelect }) {
       type="button"
       onClick={() => onSelect(name)}
       className={[
-        "flex w-full flex-row items-center justify-between gap-3 rounded-md py-2 px-3 text-left transition-colors duration-150",
+        "flex w-full flex-row items-center justify-between gap-3 rounded-md py-2 px-3 text-left transition-colors duration-150 relative",
         "border-l-4",
         isSelected
           ? "border-l-cs2-orange bg-cs2-orange/10"
@@ -89,14 +89,19 @@ function PlayerRow({ player, selected, onSelect }) {
           </span>
         )}
       </div>
-      <span className="shrink-0 font-mono text-xs text-gray-400 tabular-nums sm:text-sm">
+      <span className="shrink-0 font-mono text-xs text-zinc-500 tabular-nums sm:text-sm">
         K: {kills} / D: {deaths} / A: {assists}
       </span>
+      {isParsed && (
+        <div className="absolute top-1 right-1">
+          <Sparkles className="h-3 w-3 text-cs2-orange animate-pulse drop-shadow-[0_0_8px_rgba(255,170,0,0.6)]" />
+        </div>
+      )}
     </button>
   );
 }
 
-function TeamBlock({ title, players, selected, onSelect }) {
+function TeamBlock({ title, players, selected, onSelect, parsedNames = [] }) {
   return (
     <div className="rounded-lg border border-white/10 bg-[#121212]/90 p-2">
       <h3 className="mb-1.5 px-1 text-[11px] font-bold uppercase tracking-wider text-zinc-400">
@@ -107,7 +112,13 @@ function TeamBlock({ title, players, selected, onSelect }) {
           <p className="py-2 text-center text-[10px] text-zinc-600">暂无</p>
         ) : (
           players.map((p) => (
-            <PlayerRow key={p.name} player={p} selected={selected} onSelect={onSelect} />
+            <PlayerRow
+              key={p.name}
+              player={p}
+              selected={selected}
+              onSelect={onSelect}
+              isParsed={parsedNames.includes(p.name)}
+            />
           ))
         )}
       </div>
@@ -119,9 +130,10 @@ function TeamBlock({ title, players, selected, onSelect }) {
  * @param {{ players: any[], selected: string[], onSelect: (name: string) => void, onAnalyze: () => void, disabled: boolean }} props
  * `selected` 为已选玩家名称数组；`onSelect` 接收名称进行切换（toggle）。
  */
-export default function PlayerSelect({ players, selected, onSelect, onAnalyze, disabled }) {
+export default function PlayerSelect({ players, selected, onSelect, onAnalyze, disabled, parsed = [] }) {
   const list = (players ?? []).map(normalizePlayer);
   const selectedArr = Array.isArray(selected) ? selected : (selected ? [selected] : []);
+  const parsedNames = Array.isArray(parsed) ? parsed : [];
 
   const teamA = list.filter((p) => p.team === 3);
   const teamB = list.filter((p) => p.team === 2);
@@ -151,8 +163,8 @@ export default function PlayerSelect({ players, selected, onSelect, onAnalyze, d
       </p>
 
       <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-2">
-        <TeamBlock title="队伍 A" players={teamA} selected={selectedArr} onSelect={onSelect} />
-        <TeamBlock title="队伍 B" players={teamB} selected={selectedArr} onSelect={onSelect} />
+        <TeamBlock title="队伍 A" players={teamA} selected={selectedArr} onSelect={onSelect} parsedNames={parsedNames} />
+        <TeamBlock title="队伍 B" players={teamB} selected={selectedArr} onSelect={onSelect} parsedNames={parsedNames} />
       </div>
 
       {unknown.length > 0 && (
@@ -160,7 +172,13 @@ export default function PlayerSelect({ players, selected, onSelect, onAnalyze, d
           <p className="mb-1 px-1 text-[10px] font-semibold text-zinc-500">未识别队伍</p>
           <div className="flex flex-col gap-0.5">
             {unknown.map((p) => (
-              <PlayerRow key={p.name} player={p} selected={selectedArr} onSelect={onSelect} />
+              <PlayerRow
+                key={p.name}
+                player={p}
+                selected={selectedArr}
+                onSelect={onSelect}
+                isParsed={parsedNames.includes(p.name)}
+              />
             ))}
           </div>
         </div>
