@@ -11,7 +11,7 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parent
 DIST_DIR = BACKEND_DIR / "dist" / "app"
 
-# Packages to include as-is (.pyd) without Nuitka compilation
+# polars + pyarrow 是 demoparser2 的运行时依赖，必须包含（但 Nuitka 不编译它们，只打包 .pyd）
 RUNTIME_ONLY_PACKAGES = ["polars", "pyarrow"]
 
 EXCLUDES = [
@@ -54,7 +54,6 @@ def build_app() -> None:
     result = subprocess.run(cmd, cwd=BACKEND_DIR)
     if result.returncode != 0:
         sys.exit(f"[nuitka-build] app.exe build failed with code {result.returncode}")
-    # Nuitka --standalone outputs a directory named <script>.dist/
     out_dir = DIST_DIR / "run_server.dist"
     exe_path = out_dir / "app.exe"
     if not exe_path.is_file():
@@ -63,6 +62,9 @@ def build_app() -> None:
 
 
 def main() -> None:
+    # Clean previous build for a fresh start
+    if DIST_DIR.exists():
+        shutil.rmtree(DIST_DIR, ignore_errors=True)
     DIST_DIR.mkdir(parents=True, exist_ok=True)
 
     build_app()
