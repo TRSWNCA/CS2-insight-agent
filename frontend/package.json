@@ -12,8 +12,9 @@
     "electron:clean": "node scripts/clean-dist-electron.mjs",
     "electron:copy-python": "node scripts/copy-python-for-bundle.mjs",
     "electron:stage-python": "node scripts/run-electron-stage-python.mjs",
+    "electron:nuitka": "node scripts/nuitka-build.mjs",
     "electron:icons": "node scripts/generate-windows-icon.mjs",
-    "electron:build": "npm run build && npm run electron:stage-python && node scripts/check-electron-bundle-prereqs.mjs && npm run electron:icons && npm run electron:clean && npm exec electron-builder --",
+    "electron:build": "npm run build && npm run electron:icons && npm run electron:clean && npm exec electron-builder --",
     "electron:build:ver": "node scripts/electron-build-version.mjs",
     "deploy:r2": "node scripts/deploy-r2.mjs"
   },
@@ -43,22 +44,22 @@
         ]
       },
       {
+        "from": "../backend/dist/app",
+        "to": "app",
+        "filter": [
+          "**/*.exe"
+        ]
+      },
+      {
         "from": "../backend",
         "to": "backend",
         "filter": [
           "**/*",
           "!**/__pycache__",
           "!**/*.pyc",
-          "!**/.pytest_cache"
-        ]
-      },
-      {
-        "from": "../python",
-        "to": "python",
-        "filter": [
-          "**/*",
-          "!**/__pycache__",
-          "!**/*.pyc"
+          "!**/.pytest_cache",
+          "!dist/**",
+          "!build/**"
         ]
       },
       {

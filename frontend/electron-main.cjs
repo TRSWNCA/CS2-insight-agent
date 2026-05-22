@@ -177,26 +177,29 @@ function startBackend() {
   // 启动前清理
   killBackend();
 
-  // 增强的路径探测逻辑
-  // 1. 尝试 process.resourcesPath (真实打包后的位置)
-  // 2. 尝试 __dirname 向上两级 (模拟生产环境运行时的位置)
-  const possibleBaseDirs = [
-    process.resourcesPath,
-    path.join(__dirname, '..'), // dist 目录在项目根目录下，所以向上走一级
-    path.join(__dirname, '../..')
+  // Path resolution priority:
+  // 1. Nuitka compiled executable (resourcesPath/app/app.exe)
+  // 2. Local dev Nuitka build (backend/dist/app/app.exe)
+  // 3. Fallback: python/python.exe + run_server.py (legacy / dev)
+  const possibleBackends = [
+    // Nuitka compiled — single exe
+    { exe: path.join(process.resourcesPath, 'app', 'app.exe'), cwd: process.resourcesPath },
+    // Local Nuitka build
+    { exe: path.join(__dirname, '..', '..', 'backend', 'dist', 'app', 'app.exe'), cwd: path.join(__dirname, '..', '..', 'backend') },
+    // Legacy python + run_server.py
+    { exe: path.join(process.resourcesPath, 'python', 'python.exe'), script: path.join(process.resourcesPath, 'backend', 'app', 'run_server.py'), cwd: path.join(process.resourcesPath, 'backend') },
+    { exe: path.join(__dirname, '..', 'python', 'python.exe'), script: path.join(__dirname, '..', '..', 'backend', 'app', 'run_server.py'), cwd: path.join(__dirname, '..', '..', 'backend') },
   ];
 
-  let pythonExe = '';
-  let runServerPy = '';
-  let finalBaseDir = '';
+  let backendExe = '';
+  let backendScript = '';
+  let backendCwd = '';
 
-  for (const base of possibleBaseDirs) {
-    const py = path.join(base, 'python', 'python.exe');
-    const rs = path.join(base, 'backend', 'app', 'run_server.py');
-    if (fs.existsSync(py) && fs.existsSync(rs)) {
-      pythonExe = py;
-      runServerPy = rs;
-      finalBaseDir = base;
+  for (const candidate of possibleBackends) {
+    if (fs.existsSync(candidate.exe)) {
+      backendExe = candidate.exe;
+      backendScript = candidate.script || '';
+      backendCwd = candidate.cwd;
       break;
     }
   }
@@ -207,7 +210,7 @@ function startBackend() {
 
   const configPath = path.join(dataRoot, 'cs2-insight.config.json');
   const logsPath = path.join(dataRoot, 'logs');
-  const bundleDataDir = finalBaseDir ? path.join(finalBaseDir, 'data') : '';
+  const bundleDataDir = backendCwd ? path.join(backendCwd, 'data') : '';
 
   try {
     fs.mkdirSync(dataRoot, { recursive: true });
@@ -224,11 +227,12 @@ function startBackend() {
     log.info('[Backend] Bundled read-only data (examples/basic.ini):', bundleDataDir);
   }
 
-  if (pythonExe && runServerPy) {
+  if (backendExe) {
     if (bundleDataDir && !fs.existsSync(bundleDataDir)) {
       log.warn(`[Backend] Missing bundled data dir: ${bundleDataDir} (example config / basic.ini)`);
     }
-    log.info(`[Backend] Starting from: ${pythonExe}`);
+    log.info(`[Backend] Starting from: ${backendExe}`);
+    const spawnArgs = backendScript ? [backendScript] : [];
     const spawnEnv = {
       ...process.env,
       CS2_INSIGHT_PORT: '19871',
@@ -241,8 +245,8 @@ function startBackend() {
     if (bundleDataDir) {
       spawnEnv.CS2_INSIGHT_BUNDLE_DATA_DIR = bundleDataDir;
     }
-    backendProcess = spawn(pythonExe, [runServerPy], {
-      cwd: path.join(finalBaseDir, 'backend'),
+    backendProcess = spawn(backendExe, spawnArgs, {
+      cwd: backendCwd,
       env: spawnEnv,
     });
 
@@ -262,10 +266,11 @@ function startBackend() {
       log.error('[Backend] spawn failed:', err);
     });
   } else {
-    const searched = possibleBaseDirs.filter(Boolean).join('\n• ');
+    const searched = possibleBackends.map(b => b.exe).filter(Boolean).join('\n• ');
     const msg = [
-      '未在安装目录中找到内嵌 Python 与后端（需要 resources/python/python.exe 与 resources/backend/...）。',
-      '打包前请在仓库根目录放置官方 Windows embeddable Python 解压到 python/，并确保 electron-builder 的 extraResources 已打进安装包。',
+      '未找到后端可执行文件（需要 Nuitka 编译的 app.exe 或 python/python.exe）。',
+      '打包前请先运行 `npm run electron:nuitka` 编译 Nuitka 可执行文件，',
+      '或在仓库根目录放置已配置好的 python/ 目录。',
       '',
       '已搜索位置：',
       `• ${searched}`,

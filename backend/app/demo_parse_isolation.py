@@ -36,7 +36,23 @@ def run_parse_worker(action: str, **payload: Any) -> Any:
     env = os.environ.copy()
     env.setdefault("PYTHONIOENCODING", "utf-8")
     worker_path = Path(__file__).with_name("parse_worker.py")
-    cmd = [sys.executable, str(worker_path), str(req_path), str(out_path)]
+    if getattr(sys, "frozen", False):
+        # Nuitka/PyInstaller: parse_worker.exe 与主 exe 同级
+        exe_dir = Path(sys.executable).parent
+        worker_exe = exe_dir / "parse_worker.exe"
+        if not worker_exe.is_file():
+            # Nuitka --onefile 解压在 _MEIPASS 或 sys._nuitka_home
+            nuitka_home = getattr(sys, "_nuitka_home", None)
+            if nuitka_home:
+                worker_exe = Path(nuitka_home) / "parse_worker.exe"
+        if not worker_exe.is_file():
+            raise IsolatedParseError(
+                f"未找到 parse_worker.exe，期望位置: {exe_dir / 'parse_worker.exe'}"
+            )
+        worker_cmd = [str(worker_exe)]
+    else:
+        worker_cmd = [sys.executable, str(worker_path)]
+    cmd = [*worker_cmd, str(req_path), str(out_path)]
     try:
         with err_path.open("w", encoding="utf-8", errors="replace") as err_file:
             cp = subprocess.run(

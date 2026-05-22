@@ -56,9 +56,11 @@ def _install_windows_selector_loop() -> None:
 
 def main() -> None:
     _install_windows_selector_loop()
-    backend = _backend_dir()
-    if backend not in sys.path:
-        sys.path.insert(0, backend)
+    is_frozen = getattr(sys, "frozen", False)
+    if not is_frozen:
+        backend = _backend_dir()
+        if backend not in sys.path:
+            sys.path.insert(0, backend)
     host = os.environ.get("CS2_INSIGHT_HOST", "127.0.0.1")
     try:
         port = int(os.environ.get("CS2_INSIGHT_PORT", "19871"))
@@ -71,7 +73,6 @@ def main() -> None:
         loop="asyncio",
         log_level="info",
         access_log=True,
-        app_dir=backend,
     )
 
 

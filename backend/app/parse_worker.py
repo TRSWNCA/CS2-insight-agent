@@ -11,6 +11,10 @@ from typing import Any, Optional
 if __package__:
     from .demo_parser import DemoAnalyzer, get_demo_match_summary, get_player_list
     from .radar.radar_data_extractor import extract_radar_timeline_impl
+elif getattr(sys, "frozen", False):
+    # Nuitka/PyInstaller standalone: modules are already available
+    from app.demo_parser import DemoAnalyzer, get_demo_match_summary, get_player_list
+    from app.radar.radar_data_extractor import extract_radar_timeline_impl
 else:
     backend_dir = Path(__file__).resolve().parents[1]
     if str(backend_dir) not in sys.path:
