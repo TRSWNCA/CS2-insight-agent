@@ -25,7 +25,7 @@ from obswebsocket import exceptions as obs_ws_exceptions
 from obswebsocket import obsws, requests as obs_requests
 from obswebsocket.core import RecvThread, ReconnectThread
 
-from .demo_parse_isolation import IsolatedParseError, get_demo_match_summary_isolated
+from .demo_parse_isolation import ParseError, get_demo_match_summary_isolated
 from .demo_parser import (
     BUFFER_SECONDS_AFTER,
     BUFFER_SECONDS_BEFORE,

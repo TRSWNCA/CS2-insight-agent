@@ -194,7 +194,7 @@ def extract_radar_timeline(
     record_segments: list[dict[str, Any]] | None = None,
     radar_timing: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Wrap isolated worker (demoparser native crashes cannot kill FastAPI)."""
+    """Wrap direct call with exception handling (demoparser errors are caught, not crashing FastAPI)."""
     try:
         result = extract_radar_timeline_isolated(
             demo_path=demo_path,
@@ -234,7 +234,6 @@ def extract_radar_timeline_impl(
     radar_timing: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Runs inside parse_worker child process.
     从 demo 中提取雷达时间线（与成片 fps / 时长对齐，每帧一条）。
     时间轴：radar_timing > record_segments > record_start/end 线性铺满 tick 区间。
     """

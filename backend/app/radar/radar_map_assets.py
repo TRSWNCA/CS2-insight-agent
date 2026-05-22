@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -15,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 def _backend_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        resources = os.environ.get("CS2_INSIGHT_RESOURCES_DIR")
+        if resources:
+            return Path(resources) / "backend"
     return Path(__file__).resolve().parents[2]
 
 

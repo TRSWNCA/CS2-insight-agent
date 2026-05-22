@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const buildScript = join(repoRoot, "backend", "nuitka-build.py");
 const pythonExe = join(repoRoot, "python", "python.exe");
-const outputExe = join(repoRoot, "backend", "dist", "app", "app.exe");
+const outputDir = join(repoRoot, "backend", "dist", "app", "run_server.dist");
 
 console.log("[nuitka-build] Starting Nuitka compilation...");
 
@@ -24,4 +24,4 @@ if (result.status !== 0) {
   process.exit(result.status ?? 1);
 }
 
-console.log(`[nuitka-build] Output: ${outputExe}`);
+console.log(`[nuitka-build] Output: ${outputDir}/app.exe (+ dependencies)`);

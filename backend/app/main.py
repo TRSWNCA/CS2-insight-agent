@@ -374,7 +374,7 @@ def _analyze_demo_sync(
     target_player: str,
     freeze_to_death_rounds: Optional[list[int]] = None,
 ) -> dict:
-    """Parse in a child process so demoparser native crashes cannot kill FastAPI."""
+    """Parse demo with exception handling (demoparser errors are caught, not crashing FastAPI)."""
     from .demo_parse_isolation import analyze_demo_isolated
 
     return analyze_demo_isolated(dem_path, target_player, freeze_to_death_rounds)
@@ -521,7 +521,7 @@ async def _run_library_demo_analyze(
     await demo_db.update_status(dem_path, "parsing", error_msg=None, parsed_at=None)
     players_out: dict = {}
     try:
-        from .demo_parse_isolation import IsolatedParseError
+        from .demo_parse_isolation import ParseError
 
         for player in target_players:
             parsed = await asyncio.to_thread(
@@ -531,7 +531,7 @@ async def _run_library_demo_analyze(
                 freeze_to_death_rounds,
             )
             players_out[player] = parsed
-    except IsolatedParseError as e:
+    except ParseError as e:
         msg = f"Demo 解析失败：{e}"
         logger.error("Library demo parse failed demo_id=%s path=%s: %s", demo_id, dem_path, e)
         await demo_db.update_status(dem_path, "error", error_msg=msg, parsed_at=None)
@@ -1271,7 +1271,7 @@ async def upload_demos(files: Annotated[list[UploadFile], File()]):
 
 @app.post("/api/demo/parse")
 async def parse_demo(req: ParseRequest, filename: str):
-    from .demo_parse_isolation import IsolatedParseError
+    from .demo_parse_isolation import ParseError
 
     dem_path = UPLOAD_DIR / filename
     if not dem_path.exists():
@@ -1284,7 +1284,7 @@ async def parse_demo(req: ParseRequest, filename: str):
             req.target_player,
             req.freeze_to_death_rounds,
         )
-    except IsolatedParseError as e:
+    except ParseError as e:
         raise HTTPException(500, f"Demo 解析失败：{e}") from e
 
     cfg = load_config()
@@ -1311,7 +1311,7 @@ class ParseMultiRequest(BaseModel):
 @app.post("/api/demo/parse-multi")
 async def parse_demo_multi(req: ParseMultiRequest, filename: str):
     """多玩家解析：对同一个 Demo 依次分析每个目标玩家，返回 { players: { name: result } }。"""
-    from .demo_parse_isolation import IsolatedParseError
+    from .demo_parse_isolation import ParseError
 
     dem_path = UPLOAD_DIR / filename
     if not dem_path.exists():
@@ -1328,7 +1328,7 @@ async def parse_demo_multi(req: ParseMultiRequest, filename: str):
                 player,
                 req.freeze_to_death_rounds,
             )
-    except IsolatedParseError as e:
+    except ParseError as e:
         raise HTTPException(500, f"Demo 解析失败：{e}") from e
 
     if cfg.ai_mode and cfg.llm.api_key:
@@ -1363,7 +1363,7 @@ async def parse_demo_batch(req: BatchParseRequest):
     批量解析：``paths`` 为上传后返回的绝对路径或 ``UPLOAD_DIR`` 下的文件名。
     使用线程池并行调用 ``DemoAnalyzer.analyze``，顺序与 ``paths`` 一致。
     """
-    from .demo_parse_isolation import IsolatedParseError
+    from .demo_parse_isolation import ParseError
 
     resolved: list[Path] = []
     for p in req.paths:
@@ -1383,7 +1383,7 @@ async def parse_demo_batch(req: BatchParseRequest):
         tasks = [loop.run_in_executor(pool, run_one, str(p)) for p in resolved]
         try:
             raw_matches: list[dict] = await asyncio.gather(*tasks)
-        except IsolatedParseError as e:
+        except ParseError as e:
             raise HTTPException(500, f"Demo 解析失败：{e}") from e
 
     cfg = load_config()

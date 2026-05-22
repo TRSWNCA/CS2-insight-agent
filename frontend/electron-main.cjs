@@ -178,14 +178,14 @@ function startBackend() {
   killBackend();
 
   // Path resolution priority:
-  // 1. Nuitka compiled executable (resourcesPath/app/app.exe)
-  // 2. Local dev Nuitka build (backend/dist/app/app.exe)
+  // 1. Nuitka directory mode (resourcesPath/app/run_server.dist/app.exe)
+  // 2. Local dev Nuitka build (backend/dist/app/run_server.dist/app.exe)
   // 3. Fallback: python/python.exe + run_server.py (legacy / dev)
   const possibleBackends = [
-    // Nuitka compiled — single exe
-    { exe: path.join(process.resourcesPath, 'app', 'app.exe'), cwd: process.resourcesPath },
+    // Nuitka directory mode — app.exe + .dll/.pyd siblings (no extraction overhead)
+    { exe: path.join(process.resourcesPath, 'app', 'run_server.dist', 'app.exe'), cwd: path.join(process.resourcesPath, 'app', 'run_server.dist') },
     // Local Nuitka build
-    { exe: path.join(__dirname, '..', '..', 'backend', 'dist', 'app', 'app.exe'), cwd: path.join(__dirname, '..', '..', 'backend') },
+    { exe: path.join(__dirname, '..', '..', 'backend', 'dist', 'app', 'run_server.dist', 'app.exe'), cwd: path.join(__dirname, '..', '..', 'backend', 'dist', 'app', 'run_server.dist') },
     // Legacy python + run_server.py
     { exe: path.join(process.resourcesPath, 'python', 'python.exe'), script: path.join(process.resourcesPath, 'backend', 'app', 'run_server.py'), cwd: path.join(process.resourcesPath, 'backend') },
     { exe: path.join(__dirname, '..', 'python', 'python.exe'), script: path.join(__dirname, '..', '..', 'backend', 'app', 'run_server.py'), cwd: path.join(__dirname, '..', '..', 'backend') },
@@ -241,6 +241,7 @@ function startBackend() {
       CS2_INSIGHT_CONFIG: configPath,
       CS2_INSIGHT_LOG_DIR: logsPath,
       CS2_INSIGHT_DATA_DIR: dataRoot,
+      CS2_INSIGHT_RESOURCES_DIR: process.resourcesPath,
     };
     if (bundleDataDir) {
       spawnEnv.CS2_INSIGHT_BUNDLE_DATA_DIR = bundleDataDir;

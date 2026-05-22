@@ -44,22 +44,20 @@
         ]
       },
       {
-        "from": "../backend/dist/app",
-        "to": "app",
+        "from": "../backend/dist/app/run_server.dist",
+        "to": "app/run_server.dist",
         "filter": [
-          "**/*.exe"
+          "**/*"
         ]
       },
       {
         "from": "../backend",
         "to": "backend",
         "filter": [
-          "**/*",
+          "assets/**/*",
           "!**/__pycache__",
           "!**/*.pyc",
-          "!**/.pytest_cache",
-          "!dist/**",
-          "!build/**"
+          "!**/.pytest_cache"
         ]
       },
       {
