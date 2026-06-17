@@ -6,6 +6,10 @@
   <br>
 </h1>
 
+<p align="center">
+  <a href="./README.md"><img src="./asset/icon-cn.svg" alt="" width="20" height="20"> 简体中文</a> | <a href="./README_EN.md"><img src="./asset/icon-en.svg" alt="" width="20" height="20"> English</a>
+</p>
+
 <h3 align="center"><b>CS2 洞察智能体：为 CS2 玩家打造的桌面端智能电竞终端</b> </h3>
 <h4 align="center"> Demo 管理，高光提取，自动剪辑，LLM 锐评</h4>
 
