@@ -7,7 +7,7 @@
 </h1>
 
 <p align="center">
-  <a href="./README.md"><img src="./asset/icon-cn.svg" alt="" width="20" height="20"> 简体中文</a> | <a href="./README_EN.md"><img src="./asset/icon-en.svg" alt="" width="20" height="20"> English</a>
+  <a href="./README.md"><img src="./asset/icon-cn.svg" alt="" width="20" height="20" style="vertical-align: middle;"> 简体中文</a> | <img src="./asset/icon-en.svg" alt="" width="20" height="20" style="vertical-align: middle;"> English
 </p>
 
 <h3 align="center"><b>CS2 Insight Agent: Desktop Intelligent Esports Terminal for CS2 Players</b> </h3>
