@@ -744,7 +744,7 @@ export default function SettingsPage() {
                     </span>
                     <button
                       type="button"
-                      onClick={() => API.post("/api/config/open-dir").catch(() => {})}
+                      onClick={() => API.post("config/open-dir").catch(() => {})}
                       className="shrink-0 rounded-md border border-cs2-border bg-cs2-bg-input px-3 py-2 text-xs font-medium text-cs2-text-secondary transition-colors hover:border-cs2-accent/50 hover:text-cs2-accent"
                     >
                       {t("settings.openDirBtn")}
